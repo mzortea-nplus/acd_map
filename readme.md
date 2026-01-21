@@ -13,7 +13,22 @@ cd acd_map
 
 Make sure you are in the project root (the folder containing `config.yml`, `setup_dbt.py`, and `main.py`).
 
-### 2. Configure `config.yml`
+### 2. Create a virtual environment and install dependencies
+
+- **(Recommended)** create and activate a virtual environment, then install the Python dependencies listed in `requirements.txt`:
+
+```bash
+python -m venv .venv
+.\.venv\Scripts\activate      # on Windows
+# source .venv/bin/activate   # on macOS / Linux
+
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+- Ensure `dbt` (with the DuckDB adapter) is installed either via `requirements.txt` or your global environment.
+
+### 3. Configure `config.yml`
 
 - **Open** `config.yml` and set:
   - **`models`**:
@@ -25,7 +40,7 @@ Make sure you are in the project root (the folder containing `config.yml`, `setu
 
 Save the file before continuing.
 
-### 3. Initialize the dbt project from the config
+### 4. Initialize the dbt project from the config
 
 From the project root:
 
@@ -37,7 +52,7 @@ This will:
 - Create/update the `dbt/` project (`dbt_project.yml`, `profiles.yml`).
 - Generate one `.sql` model per entry in `config.yml` under `models`, each reading the corresponding CSV files via DuckDB.
 
-### 4. Build the DuckDB models with dbt
+### 5. Build the DuckDB models with dbt
 
 Change into the `dbt/` directory and run dbt:
 
@@ -48,7 +63,7 @@ dbt run
 
 This will materialize the views/tables (e.g. `acd`, `map`) in the DuckDB database specified in `profiles.yml` / `config.yml`.
 
-### 5. Run the main analysis script
+### 6. Run the main analysis script
 
 Return to the project root and call `main.py`, passing the DuckDB file path created in step 4 (usually in `dbt/` and named `<database.name>.duckdb`):
 
