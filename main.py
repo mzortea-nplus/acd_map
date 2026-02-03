@@ -1,327 +1,341 @@
-import re
-import stat
-from unittest import result
-import duckdb
 import pandas as pd
 from matplotlib import pyplot as plt
-import sys
 import os
 from scipy.fft import rfft, rfftfreq
 import numpy as np
 import yaml
-from datetime import datetime as dt
 from scipy.optimize import curve_fit
 
 
 class Device:
-    def __init__(self, df, sensors):
-        self.df = df
-        self.fs = self.compute_sampling_frequency(df["ts"])
+    def __init__(self, path, sensors, flip=False):
+        self.path = path
+        self.df = pd.DataFrame()
+
+        for f in os.listdir(path):
+            if f.endswith(".csv"):
+                filepath = os.path.join(path, f)
+                df = pd.read_csv(filepath, delimiter=";")
+
+                df = df[sensors + ["time"]]
+                self.df = pd.concat([self.df, df], ignore_index=True)
+
+        self.df["time"] = pd.to_datetime(
+            self.df["time"], format="%Y/%m/%d %H:%M:%S:%f"
+        )
+        self.df = self.df.sort_values("time").reset_index(drop=True)
+        if flip: 
+            self.df[sensors] *= -1.0
+
+        self.fs = self.compute_sampling_frequency(self.df["time"])
         self.sensors = sensors
+
+        # ---- FIX: single temporal grouping key ----
+        self.df["day_hour"] = self.df["time"].dt.floor("h")
 
     @staticmethod
     def compute_sampling_frequency(time_df):
-        dt = time_df.diff().dt.total_seconds().iloc[1]
+        all_dts = time_df.diff().dt.total_seconds().iloc[1:]
+        dt = all_dts.mode()[0]
         return 1 / dt
 
     @staticmethod
-    def get_all_hours(df):
-        return df["hour"].unique()
-
-    @staticmethod
-    def get_all_days(df):
-        return df["day"].unique()
-
-    @staticmethod
-    def get_all_months(df):
-        return df["month"].unique()
+    def get_all_day_hours(df, min_ts=None, max_ts=None):
+        ts = df["day_hour"].unique()
+        if min_ts is not None:
+            ts = ts[ts >= min_ts]
+        if max_ts is not None:
+            ts = ts[ts <= max_ts]
+        return np.sort(ts)
 
 
-# Read sensors from config.yml
+# ================= CONFIG =================
 with open("config.yml", "r") as f:
     config = yaml.safe_load(f)
 
-db_path = sys.argv[1]
 os.makedirs("figures", exist_ok=True)
-os.makedirs("figures/spectral_analysis", exist_ok=True)
-
-models = config.get("models", [])
-
-conn = duckdb.connect(db_path, read_only=True)  # connect to database
-
 
 devices = {}
-for m in models:
-    dev_name = m["name"]
-    df = conn.execute(
-        f"""
-        SELECT * FROM {dev_name} WHERE date_part('minute', ts) <= {config.get('analysis').get('minutes_per_hour')}
-        """
-    ).df()
-
-    devices[dev_name] = Device(df, m.get("sensors", []))
-
-    print(f"Loaded dataframe for model {dev_name}")
-    print(f"Estimated sampling frequency: {devices[dev_name].fs}")
-    print(f"Data example:")
-    print(df.head(5))
-    print()
+models = config.get("models", [])
+for idx, model in enumerate(models):
+    devices[model["name"]] = Device(
+        model["data_folder"], model["sensors"], flip=model['flip_values']
+    )
 
 
-####################################################################
-###### VISUALIZE 2 SECONDS OF DATA FOR EACH HOUR FOR EACH DAY ######
-####################################################################
-if config.get("analysis").get("time_visualization") is True:
+
+# =========================================================
+# VISUALIZE 2 SECONDS OF DATA PER DAY-HOUR
+# =========================================================
+if config["analysis"].get("time_visualization"):
     n_seconds = 2
     os.makedirs("figures/2_seconds", exist_ok=True)
-    for dev_name in devices.keys():
-        dev = devices[dev_name]
+
+    for dev_name, dev in devices.items():
         os.makedirs(f"figures/2_seconds/{dev_name}", exist_ok=True)
-        for day in Device.get_all_days(dev.df):
-            dev_df_day = dev.df[dev.df["day"] == day].copy()
-            for hour in Device.get_all_hours(dev_df_day):
-                dev_df_hour = dev_df_day[dev_df_day["hour"] == hour].copy()
 
-                if dev_df_hour.shape[0] is None:
-                    continue
+        for dh in Device.get_all_day_hours(dev.df):
+            df_h = dev.df[dev.df["day_hour"] == dh]
 
-                for s in dev.sensors:
-                    plt.plot(
-                        (
-                            dev_df_hour["ts"].iloc[: int(n_seconds * dev.fs)]
-                            - dev_df_hour["ts"].iloc[0]
-                        ).dt.total_seconds(),
-                        dev_df_hour[s].iloc[: int(n_seconds * dev.fs)],
-                        label=s,
-                    )
+            if df_h.empty:
+                continue
 
-                    plt.xlabel("time [s]")
-                    plt.ylabel("values")
-                    plt.legend()
-                    plt.title(f"Device: {dev_name}, Day: {day}, Hour: {hour}")
-                    plt.grid()
-                    plt.savefig(
-                        f"figures/2_seconds/{dev_name}/day_{day}_hour_{hour}_sens_{s}.png"
-                    )
-                    plt.close()
-####################################################################
+            for s in dev.sensors:
+                n = int(n_seconds * dev.fs)
+                t0 = df_h["time"].iloc[0]
 
+                plt.plot(
+                    (df_h["time"].iloc[:n] - t0).dt.total_seconds(),
+                    df_h[s].iloc[:n],
+                )
 
-####################################################################
-#### VISUALIZE OFFSET BETWEEN THE MAP AND THE ACD ####
-####################################################################
-if config.get("analysis").get("offset") is True:
+                plt.title(f"{dev_name} – {dh}")
+                plt.xlabel("time [s]")
+                plt.ylabel("values")
+                plt.grid()
+                dh_ts = pd.to_datetime(dh)
+                dh_str = dh_ts.strftime("%Y-%m-%d_%H-%M")
+                plt.savefig(
+                    f"figures/2_seconds/{dev_name}/{dh_str}_sens_{s}.png"
+                )
+                plt.close()
+
+# =========================================================
+# OFFSET OVER TIME
+# =========================================================
+if config["analysis"].get("offset"):
     os.makedirs("figures/offset", exist_ok=True)
-    for dev_name in devices.keys():
-        dev = devices[dev_name]
+
+    for dev_name, dev in devices.items():
         os.makedirs(f"figures/offset/{dev_name}", exist_ok=True)
-        avg_vals = []
-        time_list = []
-        for day in Device.get_all_days(dev.df):
-            dev_df_day = dev.df[dev.df["day"] == day].copy()
-            for hour in Device.get_all_hours(dev_df_day):
-                dev_df_hour = dev_df_day[dev_df_day["hour"] == hour].copy()
 
-                if dev_df_hour.shape[0] is None:
-                    continue
+        out = (
+            dev.df
+            .groupby("day_hour")[dev.sensors]
+            .mean()
+            .reset_index()
+        )
 
-                for s in dev.sensors:
-                    avg_vals.append(np.average(dev_df_hour[s].values))
-                    time_list.append(dev_df_hour["ts"].iloc[0].strftime("%m/%d\n%H:%H"))
-        plt.plot(time_list, avg_vals, "o--")
+        for s in dev.sensors:
+            plt.plot(out["day_hour"], out[s], "o--")
+
         plt.xlabel("time")
         plt.ylabel("offset")
-        plt.title(f"{dev_name} offset over time")
         plt.grid()
-        factor = len(time_list) // 10 + 1
-        plt.xticks(time_list[::factor] + [time_list[-1]], rotation=30, ha="right")
         plt.tight_layout()
-        plt.savefig(f"figures/offset/{dev_name}/offset_5min_per_hour.png")
+        plt.savefig(f"figures/offset/{dev_name}/offset.png")
         plt.close()
-# ####################################################################
 
+# =========================================================
+# SPECTRAL ANALYSIS PER DAY-HOUR
+# =========================================================
+if config["analysis"].get("spectrum"):
+    os.makedirs("figures/spectrum", exist_ok=True)
 
-####################################################################
-########### SPECTRAL ANALYSIS OF THE MAP AND THE ACD ###############
-####################################################################
-if config.get("analysis").get("spectrum") is True:
-    os.makedirs("figures/offset", exist_ok=True)
-    for dev_name in devices.keys():
-        dev = devices[dev_name]
+    for dev_name, dev in devices.items():
         os.makedirs(f"figures/spectrum/{dev_name}", exist_ok=True)
-        avg_vals = []
-        time_list = []
-        for day in Device.get_all_days(dev.df):
-            dev_df_day = dev.df[dev.df["day"] == day].copy()
-            for hour in Device.get_all_hours(dev_df_day):
-                dev_df_hour = dev_df_day[dev_df_day["hour"] == hour].copy()
-                for s in dev.sensors:
-                    X_acd = rfft(dev_df_hour[s].to_numpy() - dev_df_hour[s].mean())
-                    freqs_acd = rfftfreq(dev_df_hour.shape[0], 1 / dev.fs)
-                    plt.figure(figsize=(10, 5))
-                    plt.plot(
-                        freqs_acd[1 : len(dev_df_hour[s]) // 2],
-                        np.abs(X_acd)[1 : len(dev_df_hour[s]) // 2],
-                        label=f"acd",
-                        color="blue",
-                        alpha=1.0,
-                    )
-                    plt.xlabel("Frequency [Hz]")
-                    plt.ylabel("Amplitude")
-                    plt.title(f"Day: {day}, Hour: {hour}")
-                    plt.yscale("log")
-                    plt.xlim([0.5, 60])
-                    plt.xticks(list(range(0, 61, 5)))
-                    plt.grid()
-                    plt.tight_layout()
-                    plt.savefig(
-                        f"figures/spectrum/{dev_name}/day_{day}_hour_{hour}_sens_{s}.png"
-                    )
-                    plt.close()
 
-####################################################################
+        for dh in Device.get_all_day_hours(dev.df):
+            df_h = dev.df[dev.df["day_hour"] == dh]
 
-####################################################################
-################### FIT TO SINUSOIDAL FUNCTION #####################
-####################################################################
+            for s in dev.sensors:
+                x = df_h[s].to_numpy()
+                x = x - x.mean()
+
+                X = rfft(x)
+                freqs = rfftfreq(len(x), 1 / dev.fs)
+
+                peak_freq = freqs[ np.argmax(np.abs(X)) ]
+
+                plt.subplots(2, 1, 1)
+                plt.plot(freqs, np.abs(X), alpha=0.6)
+                plt.yscale("log")
+                plt.xlim(0.5, 60)
+                plt.ylim(1e-5, 1e5)
+                plt.grid()
+
+                plt.subplots(2, 1, 1)
+                plt.plot(freqs, np.arg(X), alpha=0.6)
+                plt.yscale("log")
+                plt.xlim(0.5, 60)
+                plt.grid()
+                
+                
+                
+                dh_ts = pd.to_datetime(dh)
+                dh_str = dh_ts.strftime("%Y-%m-%d_%H-%M")
+                plt.suptitle(f"{dev_name} - {dh_str} \nPeak freq. {peak_freq:.3f} Hz")
+                plt.tight_layout()
+                plt.savefig(
+                    f"figures/spectrum/{dev_name}/{dh_str}_sens_{s}.png"
+                )
+                plt.close()
+
+# =========================================================
+# SINE FIT PER DAY-HOUR
+# =========================================================
 results = []
-if config.get("analysis").get("sine_fit") is True:
-    n_seconds = 2
+monitor_freq = 5
+if config["analysis"].get("sine_fit"):
     os.makedirs("figures/sine_fit", exist_ok=True)
-    for dev_name in devices.keys():
-        dev = devices[dev_name]
-        os.makedirs(f"figures/sine_fit/{dev_name}", exist_ok=True)
-        for day in Device.get_all_days(dev.df):
-            dev_df_day = dev.df[dev.df["day"] == day].copy()
-            for hour in Device.get_all_hours(dev_df_day):
-                dev_df_hour = dev_df_day[dev_df_day["hour"] == hour].copy()
 
-                if dev_df_hour.shape[0] is None:
+    for dev_name, dev in devices.items():
+        os.makedirs(f"figures/sine_fit/{dev_name}", exist_ok=True)
+
+        period = dev.fs / 5  # 5 Hz target
+        n_periods = 10       # fit over 10 periods
+
+        phases = {}
+        for dh in Device.get_all_day_hours(dev.df):
+            df_h = dev.df[dev.df["day_hour"] == dh]
+
+            for s in dev.sensors:
+                n = int(n_periods * period)
+                n = min(n, len(df_h))
+                if n < 5:
+                    continue  # too few points
+
+                t_raw = (df_h["time"].iloc[:n] - df_h["time"].iloc[0]).dt.total_seconds()
+                y_raw = df_h[s].iloc[:n]
+
+                # remove NaN and infinite
+                mask = np.isfinite(t_raw) & np.isfinite(y_raw)
+                t = t_raw[mask]
+                y = y_raw[mask]
+
+                if len(t) < 5:
                     continue
 
-                for s in dev.sensors:
-                    time_data = (
-                        dev_df_hour["ts"].iloc[: int(n_seconds * dev.fs)]
-                        - dev_df_hour["ts"].iloc[0]
-                    ).dt.total_seconds()
-                    sens_data = dev_df_hour[s].iloc[: int(n_seconds * dev.fs)]
+                # clip extreme outliers
+                q1, q3 = np.percentile(y, [5, 95])
+                y = np.clip(y, q1, q3)
 
-                    fit_model = (
-                        lambda x, A, B, C: A * np.sin(2 * np.pi * 5 * (x + B)) + C
-                    )
-                    params, covariance = curve_fit(
-                        fit_model,
-                        time_data,
-                        sens_data,
-                        p0=[0.1, 0.0, 0.0],
-                        bounds=([0, 0, -np.inf], [np.inf, np.inf, np.inf]),
-                    )
-                    plt.plot(time_data, sens_data, label="data")
+                # sinusoidal model
+                model = lambda x, A, B, C: A * np.sin(2 * np.pi * monitor_freq * (x + B)) + C
 
-                    plt.plot(
-                        time_data,
-                        fit_model(time_data, params[0], params[1], params[2]),
-                        label="fit",
-                    )
+                # initial guess
+                A_guess = (np.max(y) - np.min(y)) / 2
+                B_guess = 0
+                C_guess = np.mean(y)
+                p0 = [A_guess, B_guess, C_guess]
 
-                    plt.xlabel("time [s]")
-                    plt.ylabel("values")
-                    plt.legend()
-                    plt.title(f"Device: {dev_name}, Day: {day}, Hour: {hour}")
-                    plt.grid()
-                    plt.savefig(
-                        f"figures/sine_fit/{dev_name}/day_{day}_hour_{hour}_sens_{s}.png"
-                    )
-                    plt.close()
+                try:
+                    p, _ = curve_fit(model, t, y, p0=p0, maxfev=20000)
+                except Exception as e:
+                    print(e)
+                    continue
 
-                    results.append(
-                        {
-                            "sensor": s,
-                            "device": dev_name,
-                            "hour": hour,
-                            "vpp": params[0],
-                            "phase": params[1],
-                            "offset": params[2],
-                        }
-                    )
-results = pd.DataFrame(results)
-results.to_csv("results.csv", index=False)
+                # store results
+                results.append({
+                    "device": dev_name,
+                    "sensor": s,
+                    "day_hour": dh,
+                    "vpp": np.abs(p[0]),
+                    "phase": p[1],
+                    "offset": p[2],
+                })
 
-relative_phase = (
-    results[results["device"] == "acd"]["phase"].values
-    - results[results["device"] == "map"]["phase"].values
-)
-plt.plot(range(len(relative_phase)), relative_phase, "o--")
-plt.show()
+                # ---- PLOT ----
+                plt.figure(figsize=(8, 4))
+                plt.plot(t, y, label="data")
+                plt.plot(t, model(t, *p), label="fit", linestyle="--")
+                plt.xlabel("time [s]")
+                plt.ylabel("sensor value")
+                plt.title(f"{dev_name} {s} {pd.to_datetime(dh).strftime('%Y-%m-%d %H:%M')} \nVpp: {np.abs(p[0]):.3f}, phase: {p[1]:.3f}, offset: {p[2]:.3f}")
+                plt.legend()
+                plt.grid()
+                dh_str = pd.to_datetime(dh).strftime("%Y-%m-%d_%H-%M")
+                plt.savefig(f"figures/sine_fit/{dev_name}/{dh_str}_sens_{s}.png")
+                plt.close()
+
+    results = pd.DataFrame(results)
+    phase_delays = []
+    for _, gr_df in results.groupby('day_hour'): 
+        dev1_df = gr_df[gr_df['device'] == models[0]['name']]
+        dev2_df = gr_df[gr_df['device'] == models[1]['name']]
+
+        if dev1_df.empty or dev2_df.empty:
+            continue
+
+        # assume single sensor per device
+        pd1 = dev1_df['phase'].values[0] * 1e3
+        pd2 = dev2_df['phase'].values[0] * 1e3
+
+        phase_delays.append(pd1 - pd2)
+
+    # convert to numpy array for plotting
+    phase_delays = np.array(phase_delays)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(phase_delays, "o--")
+    plt.xlabel("hour index")
+    plt.ylabel("phase delay [s]")
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig("figures/relative_phase_sin.png")
+    plt.close()
+
+
+
 
 ####################################################################
+############ PHASE DELAY BETWEEN THE MAP AND THE ACD ###############
+# NON CORRETTO!!!!!!!!!!!!!!! bisogna considerare la fase iniziale!!!!!!!!!!!!!!! 
+
+acd_df = devices["acd"].df.copy()
+map_df = devices["map"].df.copy()
+delays = []
+
+if config.get("analysis").get("sine_fit") is True:
+    n_seconds = 2
+
+    for dh in Device.get_all_day_hours(dev.df):
+        # select by day_hour
+        map_df_h = map_df[map_df["day_hour"] == dh].copy()
+        acd_df_h = acd_df[acd_df["day_hour"] == dh].copy()
+
+        if map_df_h.empty or acd_df_h.empty:
+            continue
+
+        # enforce single-sensor assumption
+        if len(devices["acd"].sensors) > 1 or len(devices["map"].sensors) > 1:
+            print("!!! Attention !!!")
+            print("Phase delay via FFT does not support multiple sensors yet.")
+            continue
+        acd_sensor = devices["acd"].sensors[0]
+        map_sensor = devices["map"].sensors[0]
+
+        # ---- CLEAN DATA ----
+        acd_vals = acd_df_h[acd_sensor].to_numpy()
+        map_vals = map_df_h[map_sensor].to_numpy()
+        mask = np.isfinite(acd_vals) & np.isfinite(map_vals)
+        if np.sum(mask) < 2:
+            continue
+        acd_vals = acd_vals[mask] - np.mean(acd_vals[mask])
+        map_vals = map_vals[mask] - np.mean(map_vals[mask])
+
+        # FFT
+        X_acd = rfft(acd_vals)
+        freqs_acd = rfftfreq(len(acd_vals), 1 / devices["acd"].fs)
+
+        X_map = rfft(map_vals)
+        freqs_map = rfftfreq(len(map_vals), 1 / devices["map"].fs)
+
+        # compute phase at closest frequency to 5 Hz
+        phase_acd = np.angle(X_acd[np.argmin(np.abs(freqs_acd - 5))]) / (2 * np.pi * 5.0) * 1e3
+        phase_map = np.angle(X_map[np.argmin(np.abs(freqs_map - 5))]) / (2 * np.pi * 5.0) * 1e3
+
+        phase_delay = phase_acd - phase_map
+        delays.append(phase_delay)
+
+# plot phase delays
+plt.figure(figsize=(10, 5))
+plt.plot(delays, "o--")
+plt.xlabel("hour index")
+plt.ylabel("phase delay [ms]")
+plt.grid()
+plt.tight_layout()
+plt.savefig("figures/relative_phase_fft.png")
+plt.close()
 
 
-# ####################################################################
-# ############ PHASE DELAY BETWEEN THE MAP AND THE ACD ###############
-# ####################################################################
-# peak_phases_acd = []
-# peak_phases_map = []
-# for day in days:
-#     acd_day = df_acd[df_acd["day"] == day].copy()
-#     map_day = df_map[df_map["day"] == day].copy()
-#     for hour in hours:
-#         dev_df_hour = acd_day[acd_day["hour"] == hour].copy()
-#         map_hour = map_day[map_day["hour"] == hour].copy()
-
-#         if len(dev_df_hour) == 0 or len(map_hour) == 0:
-#             continue
-
-#         X_acd = rfft(
-#             dev_df_hour["sensor_vals"].to_numpy() - dev_df_hour["sensor_vals"].mean()
-#         )
-#         freqs_acd = rfftfreq(dev_df_hour.shape[0], 1 / fs_acd)
-#         X_map = rfft(
-#             map_hour["sensor_vals"].to_numpy() - map_hour["sensor_vals"].mean()
-#         )
-#         freqs_map = rfftfreq(map_hour.shape[0], 1 / fs_map)
-
-#         angles = np.angle(X_acd)
-#         phase_at_peak = angles[
-#             np.argmin(np.abs(freqs_acd - 5))
-#         ]  # compute phase at closest point to 5Hz
-#         peak_phases_acd.append(phase_at_peak)
-
-#         angles = np.angle(X_map)
-#         phase_at_peak = angles[
-#             np.argmin(np.abs(freqs_map - 5))
-#         ]  # compute phase at closest point to 5Hz
-#         peak_phases_map.append(phase_at_peak)
-# peak_phases_map = np.asarray(peak_phases_map)
-# peak_phases_acd = np.asarray(peak_phases_acd)
-# # plt.subplot(3, 1, 1)
-# # plt.plot(peak_phases_acd / (np.pi * 2 * fs_acd) * 1e3, linestyle="--", marker="o")
-# # plt.grid()
-# # plt.xlabel("Time [h]")
-# # plt.ylabel("Phase [ms]")
-# # plt.title("ACD phase")
-# #
-# # plt.subplot(3, 1, 2)
-# # plt.plot(peak_phases_map / (np.pi * 2 * fs_map) * 1e3, linestyle="--", marker="o")
-# # plt.grid()
-# # plt.xlabel("Time [h]")
-# # plt.ylabel("Phase [ms]")
-# # plt.title("MAP phase")
-# #
-# # plt.subplot(3, 1, 3)
-# plt.plot(
-#     peak_phases_map / (2 * np.pi * 5.0) * 1e3
-#     - peak_phases_acd / (2 * np.pi * 5.0) * 1e3,
-#     linestyle="--",
-#     marker="o",
-# )
-# plt.grid()
-# plt.xlabel("Time [h]")
-# plt.ylabel("Phase [ms]")
-# plt.title("ACD-MAP phase delay")
-# plt.tight_layout()
-# plt.savefig("figures/phases.png")
-
-# ####################################################################
-
-conn.close()

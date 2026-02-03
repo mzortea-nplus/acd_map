@@ -2,19 +2,21 @@ models:
   - name: acd
     data_folder: "C:/Users/m.zortea/Desktop/acd_map/acd"
     sensors:
-        - "03056B18_x"
+      - "03056B18_x"
+    flip_values: true
   - name: map
     data_folder: "C:/Users/m.zortea/Desktop/acd_map/map"
-    sensors: 
-        - "03092809_z"
+    sensors:
+      - "03092809_z"
+    flip_values: false
 
 database:
   name: mydb
 
 analysis:
-    minutes_per_hour: 5
-    time_visualization: true
-    offset: true
-    spectrum: true
-    phase: true
-    sine_fit: true
+  minutes_per_hour: 5
+  time_visualization: true
+  offset: true
+  spectrum: true
+  phase: true
+  sine_fit: true
