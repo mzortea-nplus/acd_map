@@ -11,8 +11,8 @@ class Device:
     def __init__(self, path, sensors, flip=False):
         self.path = path
         self.df = pd.DataFrame()
-
         for f in os.listdir(path):
+            print(f"Reading file {path}/{f}")
             if f.endswith(".csv"):
                 filepath = os.path.join(path, f)
                 df = pd.read_csv(filepath, delimiter=";")
@@ -53,6 +53,8 @@ with open("config.yml", "r") as f:
 
 os.makedirs("figures", exist_ok=True)
 
+chunk_time = config["chunk_time"]
+
 devices = {}
 models = config.get("models", [])
 for idx, model in enumerate(models):
@@ -60,6 +62,10 @@ for idx, model in enumerate(models):
         model["data_folder"], model["sensors"], flip=model["flip_values"]
     )
 
+    devices[model["name"]].df.index = pd.to_datetime(
+        devices[model["name"]].df["time"].copy(), utc=True
+    )
+    devices[model["name"]].df.sort_index()
 
 # =========================================================
 # VISUALIZE 2 SECONDS OF DATA PER DAY-HOUR
@@ -71,8 +77,7 @@ if config["analysis"].get("time_visualization"):
     for dev_name, dev in devices.items():
         os.makedirs(f"figures/2_seconds/{dev_name}", exist_ok=True)
 
-        for dh in Device.get_all_day_hours(dev.df):
-            df_h = dev.df[dev.df["day_hour"] == dh]
+        for gr_idx, df_h in dev.df.groupby(pd.Grouper(freq=chunk_time)):
 
             if df_h.empty:
                 continue
@@ -86,11 +91,11 @@ if config["analysis"].get("time_visualization"):
                     df_h[s].iloc[:n],
                 )
 
-                plt.title(f"{dev_name} – {dh}")
+                plt.title(f"{dev_name} – {gr_idx}")
                 plt.xlabel("time [s]")
                 plt.ylabel("values")
                 plt.grid()
-                dh_ts = pd.to_datetime(dh)
+                dh_ts = pd.to_datetime(gr_idx)
                 dh_str = dh_ts.strftime("%Y-%m-%d_%H-%M")
                 plt.savefig(f"figures/2_seconds/{dev_name}/{dh_str}_sens_{s}.png")
                 plt.close()
@@ -110,7 +115,9 @@ if config["analysis"].get("offset"):
         for s in dev.sensors:
             to_plot = [
                 [hr_idx, hr_df[s].mean()]
-                for hr_idx, hr_df in dev.df[[s, "day_hour"]].groupby("day_hour")
+                for hr_idx, hr_df in dev.df[[s, "day_hour"]].groupby(
+                    pd.Grouper(freq=chunk_time)
+                )
             ]
             to_plot = np.array(to_plot)
 
@@ -132,8 +139,7 @@ if config["analysis"].get("spectrum"):
     for dev_name, dev in devices.items():
         os.makedirs(f"figures/spectrum/{dev_name}", exist_ok=True)
 
-        for dh in Device.get_all_day_hours(dev.df):
-            df_h = dev.df[dev.df["day_hour"] == dh]
+        for gr_idx, df_h in dev.df.groupby(pd.Grouper(freq=chunk_time)):
 
             for s in dev.sensors:
                 x = df_h[s].to_numpy()
@@ -157,11 +163,13 @@ if config["analysis"].get("spectrum"):
                 plt.xlim(0.5, 60)
                 plt.grid()
 
-                dh_ts = pd.to_datetime(dh)
-                dh_str = dh_ts.strftime("%Y-%m-%d_%H-%M")
-                plt.suptitle(f"{dev_name} - {dh_str} \nPeak freq. {peak_freq:.3f} Hz")
+                plt.suptitle(
+                    f"{dev_name} - {gr_idx.strftime("%Y-%m-%d_%H-%M")} \nPeak freq. {peak_freq:.3f} Hz"
+                )
                 plt.tight_layout()
-                plt.savefig(f"figures/spectrum/{dev_name}/{dh_str}_sens_{s}.png")
+                plt.savefig(
+                    f"figures/spectrum/{dev_name}/{gr_idx.strftime("%Y-%m-%d_%H-%M")}_sens_{s}.png"
+                )
                 plt.close()
 
 # =========================================================
@@ -179,8 +187,7 @@ if config["analysis"].get("sine_fit"):
         n_periods = 10  # fit over 10 periods
 
         phases = {}
-        for dh in Device.get_all_day_hours(dev.df):
-            df_h = dev.df[dev.df["day_hour"] == dh]
+        for gr_idx, df_h in dev.df.groupby(pd.Grouper(freq=chunk_time)):
 
             for s in dev.sensors:
                 os.makedirs(f"figures/sine_fit/{dev_name}/{s}", exist_ok=True)
@@ -229,7 +236,7 @@ if config["analysis"].get("sine_fit"):
                     {
                         "device": dev_name,
                         "sensor": s,
-                        "day_hour": dh,
+                        "idx": gr_idx,
                         "vpp": np.abs(p[0]),
                         "phase": p[1],
                         "offset": p[2],
@@ -243,38 +250,45 @@ if config["analysis"].get("sine_fit"):
                 plt.xlabel("time [s]")
                 plt.ylabel("sensor value")
                 plt.title(
-                    f"{dev_name} {s} {pd.to_datetime(dh).strftime('%Y-%m-%d %H:%M')} \nVpp: {np.abs(p[0]):.3f}, phase: {p[1]:.3f}, offset: {p[2]:.3f}"
+                    f"{dev_name} {s} {gr_idx} \nVpp: {np.abs(p[0]):.3f}, phase: {p[1]:.3f}, offset: {p[2]:.3f}"
                 )
                 plt.legend()
                 plt.grid()
-                dh_str = pd.to_datetime(dh).strftime("%Y-%m-%d_%H-%M")
-                plt.savefig(f"figures/sine_fit/{dev_name}/{s}/{dh_str}.png")
+                plt.savefig(
+                    f"figures/sine_fit/{dev_name}/{s}/{gr_idx.strftime("%Y-%m-%d_%H-%M")}.png"
+                )
                 plt.close()
 
-    for el in config["analysis"]["relative_phases"]:
-        print(el[0], el[1])
-    # phase_delays = []
-    # for _, gr_df in results.groupby("day_hour"):
-    #     dev1_df = gr_df[gr_df["device"] == models[0]["name"]]
-    #     dev2_df = gr_df[gr_df["device"] == models[1]["name"]]
+    results = pd.DataFrame(results)
+    results.index = pd.to_datetime(results["idx"])
 
-    #     if dev1_df.empty or dev2_df.empty:
-    #         continue
+    os.makedirs("figures/relative_phases", exist_ok=True)
+    for pair in config["analysis"]["relative_phases"]:
+        if len(pair) != 2:
+            raise Exception("Formato coppie di sensori non valido")
+        dev1, s1 = pair[0].split(".")
+        dev2, s2 = pair[1].split(".")
+        phase_delays = []
+        for _, gr_df in results.groupby(pd.Grouper(freq=chunk_time)):
+            dev1_df = gr_df[(gr_df["device"] == dev1) & (gr_df["sensor"] == s1)]
+            dev2_df = gr_df[(gr_df["device"] == dev2) & (gr_df["sensor"] == s2)]
 
-    #     # assume single sensor per device
-    #     pd1 = dev1_df["phase"].values[0] * 1e3
-    #     pd2 = dev2_df["phase"].values[0] * 1e3
+            # assume single sensor per device
+            pd1 = dev1_df["phase"].values[0] * 1e3
+            pd2 = dev2_df["phase"].values[0] * 1e3
 
-    #     phase_delays.append(pd1 - pd2)
+            phase_delays.append(pd1 - pd2)
 
-    # # convert to numpy array for plotting
-    # phase_delays = np.array(phase_delays)
+        # convert to numpy array for plotting
+        phase_delays = np.array(phase_delays)
 
-    # plt.figure(figsize=(10, 5))
-    # plt.plot(phase_delays, "o--")
-    # plt.xlabel("hour index")
-    # plt.ylabel("phase delay [ms]")
-    # plt.grid()
-    # plt.tight_layout()
-    # plt.savefig("figures/relative_phase_sin.png")
-    # plt.close()
+        plt.figure(figsize=(10, 5))
+        plt.plot(phase_delays, "o--")
+        plt.xlabel("hour index")
+        plt.ylabel("phase delay [ms]")
+        plt.grid()
+        plt.tight_layout()
+        plt.savefig(
+            f"figures/relative_phases/{pair[0].replace('.', '-')}_{pair[1].replace('.', '-')}.png"
+        )
+        plt.close()
