@@ -1,1 +1,3 @@
 *.png
+src/__pycache__/delay.cpython-312.pyc
+*.pyc

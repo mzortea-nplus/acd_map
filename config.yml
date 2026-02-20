@@ -9,13 +9,9 @@ models:
     sensors:
       - "03092809_z"
     flip_values: false
-  - name: acd_2
-    data_folder: "C:/Users/m.zortea/Desktop/acd_map/acd"
-    sensors:
-      - "03056B18_y"
-    flip_values: false
 
 chunk_time: 10min
+sine_freq: 5
 
 analysis:
   time_visualization: false
