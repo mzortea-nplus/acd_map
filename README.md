@@ -1,0 +1,40 @@
+# acd_map
+
+This project analyzes and visualizes phase delays and other properties from sensor data.
+
+## Setup Instructions
+
+### 1. Clone or Download the Repository
+
+Download or clone this repository to your local machine.
+
+### 2. Create and Activate a Virtual Environment (Windows)
+
+Open a terminal in the project folder and run:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+```
+
+### 3. Install Required Python Modules
+
+Install dependencies using:
+
+```powershell
+pip install -r requirements.txt
+```
+
+### 4. Run the Main Script
+
+To execute the main analysis:
+
+```powershell
+python main.py
+```
+
+## Notes
+
+- Input data files should be placed in the appropriate folders as expected by the code.
+- Output figures and results will be saved in the `figures/` directory.
+- For troubleshooting, check the terminal output for error messages.
